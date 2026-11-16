@@ -1,0 +1,433 @@
+name: MLOps - Heart Risk pipeline
+
+# One workflow for the whole chain. The inputs decide which parts run (pipeline controlling):
+#
+#   Situation                          train   model_version     deploy
+#   New data / training code changed   true    (empty)           false   -> registers a CANDIDATE
+#   Candidate approved -> go live      false   <new version>     true
+#   Only API / Kubernetes changed      false   <current version> true
+#   Everything in one run              true    <current version> true
+#
+# A trained model never goes live automatically: you first check its metrics,
+# fairness audit and Responsible AI dashboard in Azure ML, and only then pass its
+# version number to a deploy run. That is the manual approval step.
+on:
+  workflow_dispatch:
+    inputs:
+      train:
+        description: 'Train a new model in Azure ML'
+        type: boolean
+        default: true
+      sample_fraction:
+        description: 'Fraction of the data to train on (0.1 = fast dev run, 1.0 = real model)'
+        type: string
+        default: '1.0'
+      data_version:
+        description: 'Version of the data asset heart-disease-2022'
+        type: string
+        default: '1'
+      model_version:
+        description: 'APPROVED version of heart-risk to deploy (required when deploy = true)'
+        type: string
+        required: false
+      deploy:
+        description: 'Build the API image and deploy it to Kubernetes'
+        type: boolean
+        default: false
+      rai_dashboard:
+        description: 'Create a Responsible AI dashboard for the new candidate (or for model_version)'
+        type: boolean
+        default: false
+
+concurrency:
+  group: mlops-pipeline
+  cancel-in-progress: false
+
+env:
+  GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+  WORKSPACE: ${{ vars.AZURE_ML_WORKSPACE }}
+  LOCATION: ${{ vars.AZURE_LOCATION }}
+  COMPUTE_NAME: heart-cluster
+  MODEL_NAME: heart-risk
+  IMAGE: ghcr.io/hertveldtdaan/heart-risk-api
+  AZ_CLI_VERSION: 2.91.0
+
+jobs:
+  # 0. Same tests as on every push: never train or deploy broken code
+  tests:
+    uses: ./.github/workflows/ci.yaml
+
+  # 1. Prepare Azure ML and run the training pipeline
+  azure-pipeline:
+    needs: tests
+    if: ${{ inputs.train }}
+    runs-on: ubuntu-24.04
+    environment: azure-ml
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      candidate_version: ${{ steps.register.outputs.version }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Azure Login (OIDC, no secrets stored)
+        uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Azure -- Create Compute
+        uses: azure/cli@v3
+        with:
+          azcliversion: ${{ env.AZ_CLI_VERSION }}
+          inlineScript: |
+            az extension add --name ml -y
+            az configure --defaults group=$GROUP workspace=$WORKSPACE location=$LOCATION
+            # Only create the cluster when it doesn't exist yet
+            if az ml compute show --name $COMPUTE_NAME > /dev/null 2>&1; then
+              echo "Compute $COMPUTE_NAME already exists"
+            else
+              az ml compute create --file ./computes/compute.yaml
+            fi
+
+      - name: Azure -- Check Compute
+        uses: azure/cli@v3
+        with:
+          azcliversion: ${{ env.AZ_CLI_VERSION }}
+          inlineScript: |
+            az extension add --name ml -y
+            az configure --defaults group=$GROUP workspace=$WORKSPACE location=$LOCATION
+            STATE=$(az ml compute show --name $COMPUTE_NAME --query provisioning_state -o tsv)
+            echo "Compute provisioning state: $STATE"
+            if [ "$STATE" != "Succeeded" ]; then
+              echo "::error::Compute $COMPUTE_NAME is not ready (state '$STATE')"
+              exit 1
+            fi
+
+      - name: Azure -- Check data asset
+        uses: azure/cli@v3
+        with:
+          azcliversion: ${{ env.AZ_CLI_VERSION }}
+          inlineScript: |
+            az extension add --name ml -y
+            az configure --defaults group=$GROUP workspace=$WORKSPACE location=$LOCATION
+            az ml data show --name heart-disease-2022 --version ${{ inputs.data_version }} \
+              --query "{name:name, version:version, path:path}" -o table \
+              || { echo "::error::Data asset heart-disease-2022:${{ inputs.data_version }} not found"; exit 1; }
+
+      - name: Azure -- Environment Setup
+        uses: azure/cli@v3
+        with:
+          azcliversion: ${{ env.AZ_CLI_VERSION }}
+          inlineScript: |
+            az extension add --name ml -y
+            az configure --defaults group=$GROUP workspace=$WORKSPACE location=$LOCATION
+            for file in ./environments/*.yaml; do
+              echo "Creating environment from $file"
+              az ml environment create --file "$file"
+            done
+
+      - name: Azure -- Component Setup
+        uses: azure/cli@v3
+        with:
+          azcliversion: ${{ env.AZ_CLI_VERSION }}
+          inlineScript: |
+            az extension add --name ml -y
+            az configure --defaults group=$GROUP workspace=$WORKSPACE location=$LOCATION
+            for file in ./components/*/*.yaml; do
+              echo "Creating component from $file"
+              az ml component create --file "$file"
+            done
+
+      - name: Azure -- Pipeline Run
+        id: pipeline
+        uses: azure/cli@v3
+        with:
+          azcliversion: ${{ env.AZ_CLI_VERSION }}
+          inlineScript: |
+            az extension add --name ml -y
+            az configure --defaults group=$GROUP workspace=$WORKSPACE location=$LOCATION
+            JOB_NAME="heart-risk-${GITHUB_SHA::7}-${GITHUB_RUN_ID}"
+            echo "job_name=$JOB_NAME" >> "$GITHUB_OUTPUT"
+            az ml job create --file ./pipelines/heart-pipeline.yaml \
+              --name "$JOB_NAME" \
+              --set inputs.raw_data.path="azureml:heart-disease-2022:${{ inputs.data_version }}" \
+              --set inputs.sample_fraction=${{ inputs.sample_fraction }} \
+              --set inputs.git_sha=$GITHUB_SHA \
+              --set settings.default_compute=azureml:$COMPUTE_NAME \
+              --stream
+            STATUS=$(az ml job show --name "$JOB_NAME" --query status -o tsv)
+            echo "Pipeline status: $STATUS"
+            if [ "$STATUS" != "Completed" ]; then
+              echo "::error::Pipeline $JOB_NAME ended with status $STATUS (quality gate failed?)"
+              exit 1
+            fi
+
+      # Lineage: link the registered model version to the git commit, workflow run and data version
+      - name: Azure -- Tag candidate model
+        id: register
+        uses: azure/cli@v3
+        with:
+          azcliversion: ${{ env.AZ_CLI_VERSION }}
+          inlineScript: |
+            az extension add --name ml -y
+            az configure --defaults group=$GROUP workspace=$WORKSPACE location=$LOCATION
+            VERSION=$(az ml model show --name $MODEL_NAME --label latest --query version -o tsv)
+            az ml model update --name $MODEL_NAME --version "$VERSION" \
+              --set tags.git_commit=$GITHUB_SHA \
+                    tags.github_run_id=$GITHUB_RUN_ID \
+                    tags.pipeline_job=${{ steps.pipeline.outputs.job_name }} \
+                    tags.data_version=${{ inputs.data_version }} \
+                    tags.sample_fraction=${{ inputs.sample_fraction }} \
+                    tags.stage=candidate
+            echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+            {
+              echo "## New candidate model: \`$MODEL_NAME:$VERSION\`"
+              echo "Passed the quality gate. Review it in Azure ML (metrics, fairness, Responsible AI)."
+              echo "To approve: run this workflow again with **train = false, model_version = $VERSION, deploy = true**."
+            } >> "$GITHUB_STEP_SUMMARY"
+
+  # 1b. Optional: Responsible AI dashboard (explanations, error analysis, causal "what if")
+  rai-dashboard:
+    needs: azure-pipeline
+    if: ${{ !failure() && !cancelled() && inputs.rai_dashboard }}
+    runs-on: ubuntu-24.04
+    environment: azure-ml
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+      AZURE_ML_WORKSPACE: ${{ vars.AZURE_ML_WORKSPACE }}
+      MODEL_VERSION: ${{ needs.azure-pipeline.outputs.candidate_version || inputs.model_version }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Azure Login
+        uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Download the data asset
+        run: |
+          az extension add --name ml -y
+          az ml data download --name heart-disease-2022 --version ${{ inputs.data_version }} \
+            --resource-group $AZURE_RESOURCE_GROUP --workspace-name $AZURE_ML_WORKSPACE --download-path ./rai-data
+          echo "RAW_CSV=$(find ./rai-data -name '*.csv' | head -n 1)" >> "$GITHUB_ENV"
+
+      - name: Submit the RAI dashboard pipeline
+        run: |
+          test -n "$MODEL_VERSION" || { echo "::error::No model version to analyse"; exit 1; }
+          pip install -r rai/requirements.txt pandas==2.3.3 scikit-learn==1.7.2
+          python rai/rai_dashboard.py --model-version "$MODEL_VERSION" --raw-csv "$RAW_CSV"
+
+  # 2. Download the APPROVED model from the registry
+  download:
+    needs: azure-pipeline
+    # Also run when training was skipped, but not when it failed or was cancelled
+    if: ${{ !failure() && !cancelled() && inputs.deploy }}
+    runs-on: ubuntu-24.04
+    environment: azure-ml
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Azure Login
+        uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Azure -- Download Model
+        uses: azure/cli@v3
+        with:
+          azcliversion: ${{ env.AZ_CLI_VERSION }}
+          inlineScript: |
+            az extension add --name ml -y
+            az configure --defaults group=$GROUP workspace=$WORKSPACE location=$LOCATION
+            VERSION="${{ inputs.model_version }}"
+            if [ -z "$VERSION" ]; then
+              echo "::error::Deploy requested but no approved model_version given"
+              exit 1
+            fi
+            az ml model download --name $MODEL_NAME --version "$VERSION" --download-path ./model-download
+            # The download is nested; find the folder that contains the MLmodel file
+            MLMODEL_DIR=$(dirname "$(find ./model-download -name MLmodel | head -n 1)")
+            mv "$MLMODEL_DIR" ./model
+            # Only models that passed the quality gate contain evaluation.json
+            test -f ./model/evaluation.json || { echo "::error::Model has no evaluation.json (quality gate not passed)"; exit 1; }
+            ls -la ./model
+
+      - name: Upload model for the Docker build
+        uses: actions/upload-artifact@v7
+        with:
+          name: model
+          path: model
+
+  # 3. Build and push the API image (on a GitHub runner, not on the laptop)
+  build:
+    needs: download
+    if: ${{ !failure() && !cancelled() && inputs.deploy }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Download model
+        uses: actions/download-artifact@v8
+        with:
+          name: model
+          path: model
+
+      - name: Docker -- Gather Tags
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=sha,format=long
+            type=raw,value=model-v${{ inputs.model_version }}
+            type=raw,value=latest
+
+      - name: Docker -- Login to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker -- Set up Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Docker -- Build and push
+        id: push
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: api/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            GIT_COMMIT=${{ github.sha }}
+            MODEL_VERSION=${{ inputs.model_version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # 4. Deploy to the local k3d cluster via the self-hosted runner on the laptop
+  deploy:
+    needs: build
+    if: ${{ !failure() && !cancelled() && inputs.deploy }}
+    runs-on: self-hosted
+    permissions:
+      contents: read
+      packages: read
+    env:
+      NAMESPACE: heart-risk
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Kubernetes -- Namespace and secrets
+        run: |
+          kubectl create namespace $env:NAMESPACE --dry-run=client -o yaml | kubectl apply -f -
+          kubectl create secret docker-registry ghcr-pull -n $env:NAMESPACE `
+            --docker-server=ghcr.io `
+            --docker-username=${{ github.repository_owner }} `
+            --docker-password=${{ secrets.GITHUB_TOKEN }} `
+            --dry-run=client -o yaml | kubectl apply -f -
+          kubectl create secret generic postgres-credentials -n $env:NAMESPACE `
+            --from-literal=POSTGRES_USER=heart `
+            --from-literal=POSTGRES_PASSWORD=${{ secrets.POSTGRES_PASSWORD }} `
+            --from-literal=POSTGRES_DB=predictions `
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Kubernetes -- Deploy PostgreSQL
+        run: |
+          kubectl apply -f k8s/postgres.yaml
+          kubectl rollout status statefulset/postgres -n $env:NAMESPACE --timeout=180s
+
+      - name: Kubernetes -- Deploy API (immutable image digest)
+        run: |
+          $image = "${{ env.IMAGE }}@${{ needs.build.outputs.digest }}"
+          Write-Host "Deploying $image"
+          (Get-Content k8s/api.yaml) -replace 'IMAGE_PLACEHOLDER', $image | kubectl apply -f -
+          kubectl annotate deployment/heart-api -n $env:NAMESPACE --overwrite `
+            kubernetes.io/change-cause="model v${{ inputs.model_version }}, commit ${{ github.sha }}"
+
+      - name: Kubernetes -- Wait for rollout
+        run: kubectl rollout status deployment/heart-api -n $env:NAMESPACE --timeout=300s
+
+      - name: Smoke test
+        run: |
+          $ready = Invoke-RestMethod http://localhost:30082/ready
+          Write-Host "GET /ready -> $($ready | ConvertTo-Json -Compress)"
+          $body = Get-Content api/sample_request.json -Raw
+          $result = Invoke-RestMethod -Method Post -Uri http://localhost:30082/predict -ContentType 'application/json' -Body $body
+          Write-Host "POST /predict -> risk $($result.risk_probability) ($($result.risk_level)), model v$($result.model.version)"
+          if ($result.model.version -ne "${{ inputs.model_version }}") { throw "Wrong model version is live" }
+
+      # Rollback: restore the previous ReplicaSet (previous image + model), don't retrain
+      - name: Rollback on failure
+        if: ${{ failure() }}
+        run: |
+          kubectl rollout undo deployment/heart-api -n $env:NAMESPACE
+          kubectl rollout status deployment/heart-api -n $env:NAMESPACE --timeout=180s
+
+      - name: Show result
+        if: ${{ always() }}
+        run: |
+          kubectl get statefulset,deployment,pods,service,hpa,pvc -n $env:NAMESPACE -o wide
+          kubectl rollout history deployment/heart-api -n $env:NAMESPACE
+
+  # 5. Record in the model registry which version is live (and in which image)
+  promote:
+    needs: [build, deploy]
+    if: ${{ !failure() && !cancelled() && inputs.deploy }}
+    runs-on: ubuntu-24.04
+    environment: azure-ml
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Azure Login
+        uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Azure -- Tag model as production
+        uses: azure/cli@v3
+        with:
+          azcliversion: ${{ env.AZ_CLI_VERSION }}
+          inlineScript: |
+            az extension add --name ml -y
+            az configure --defaults group=$GROUP workspace=$WORKSPACE location=$LOCATION
+            az ml model update --name $MODEL_NAME --version "${{ inputs.model_version }}" \
+              --set tags.stage=production \
+                    tags.image_digest=${{ needs.build.outputs.digest }} \
+                    tags.deployed_by_run=$GITHUB_RUN_ID
+            echo "## \`$MODEL_NAME:${{ inputs.model_version }}\` is live on http://localhost:30082/docs" >> "$GITHUB_STEP_SUMMARY"

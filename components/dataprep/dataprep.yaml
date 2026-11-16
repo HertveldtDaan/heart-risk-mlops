@@ -1,0 +1,44 @@
+$schema: https://azuremlschemas.azureedge.net/latest/commandComponent.schema.json
+name: heart_data_prep
+version: 0.1.0
+display_name: Heart data prep (clean + stratified split)
+description: Cleans the BRFSS 2022 survey data and writes a stratified train/validation/test split (CSV + MLTable).
+type: command
+is_deterministic: true
+
+code: ../../src
+environment: azureml:heart-training-env:0.1.0
+command: >-
+  python prep.py
+  --raw_data ${{inputs.raw_data}}
+  --sample_fraction ${{inputs.sample_fraction}}
+  --test_size ${{inputs.test_size}}
+  --val_size ${{inputs.val_size}}
+  --seed ${{inputs.seed}}
+  --train_data ${{outputs.train_data}}
+  --val_data ${{outputs.val_data}}
+  --test_data ${{outputs.test_data}}
+
+inputs:
+  raw_data:
+    type: uri_file
+  sample_fraction:
+    type: number
+    default: 1.0
+  test_size:
+    type: number
+    default: 0.2
+  val_size:
+    type: number
+    default: 0.1
+  seed:
+    type: integer
+    default: 42
+
+outputs:
+  train_data:
+    type: uri_folder
+  val_data:
+    type: uri_folder
+  test_data:
+    type: uri_folder

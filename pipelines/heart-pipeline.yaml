@@ -1,0 +1,73 @@
+$schema: https://azuremlschemas.azureedge.net/latest/pipelineJob.schema.json
+type: pipeline
+display_name: heart-risk-training
+experiment_name: heart-risk
+description: prep -> train -> evaluate (quality gate) -> register
+
+inputs:
+  # Versioned data asset; the workflow can override the version with --set
+  raw_data:
+    type: uri_file
+    path: azureml:heart-disease-2022:1
+  sample_fraction: 1.0     # e.g. 0.1 for a fast development run
+  seed: 42
+  n_estimators: 500
+  learning_rate: 0.05
+  num_leaves: 31
+  min_roc_auc: 0.80
+  min_recall: 0.60
+  git_sha: local           # set by GitHub Actions -> stored in release.json (lineage)
+
+outputs:
+  registration_details:
+    mode: upload
+
+jobs:
+  prep:
+    type: command
+    component: azureml:heart_data_prep:0.1.0
+    inputs:
+      raw_data: ${{parent.inputs.raw_data}}
+      sample_fraction: ${{parent.inputs.sample_fraction}}
+      seed: ${{parent.inputs.seed}}
+
+  train:
+    type: command
+    component: azureml:heart_training:0.1.0
+    inputs:
+      train_data: ${{parent.jobs.prep.outputs.train_data}}
+      val_data: ${{parent.jobs.prep.outputs.val_data}}
+      n_estimators: ${{parent.inputs.n_estimators}}
+      learning_rate: ${{parent.inputs.learning_rate}}
+      num_leaves: ${{parent.inputs.num_leaves}}
+      seed: ${{parent.inputs.seed}}
+      git_sha: ${{parent.inputs.git_sha}}
+
+  evaluate:
+    type: command
+    component: azureml:heart_evaluate:0.1.0
+    inputs:
+      model_input: ${{parent.jobs.train.outputs.model_output}}
+      test_data: ${{parent.jobs.prep.outputs.test_data}}
+      min_roc_auc: ${{parent.inputs.min_roc_auc}}
+      min_recall: ${{parent.inputs.min_recall}}
+
+  # Only reachable when the quality gate in `evaluate` passed
+  register:
+    type: command
+    component: azureml://registries/azureml/components/register_model/versions/0.0.21
+    # A compute cluster has no owner, so run this step as the identity that submitted the job
+    identity:
+      type: user_identity
+    inputs:
+      model_name: heart-risk
+      model_type: mlflow_model
+      model_path: ${{parent.jobs.evaluate.outputs.approved_model}}
+    outputs:
+      registration_details_folder: ${{parent.outputs.registration_details}}
+
+settings:
+  # Without this, Azure ML reuses cached step results when code and data are unchanged,
+  # so MLflow logging would not run again and no new model version would be registered
+  force_rerun: true
+  default_compute: azureml:heart-cluster

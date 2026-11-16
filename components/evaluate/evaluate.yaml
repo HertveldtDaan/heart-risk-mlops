@@ -1,0 +1,32 @@
+$schema: https://azuremlschemas.azureedge.net/latest/commandComponent.schema.json
+name: heart_evaluate
+version: 0.1.0
+display_name: Heart model evaluation + quality gate
+description: Evaluates the model on the held-out test set, audits fairness per group and only outputs the model when the quality gate passes.
+type: command
+
+code: ../../src
+environment: azureml:heart-training-env:0.1.0
+command: >-
+  python evaluate.py
+  --model_input ${{inputs.model_input}}
+  --test_data ${{inputs.test_data}}
+  --min_roc_auc ${{inputs.min_roc_auc}}
+  --min_recall ${{inputs.min_recall}}
+  --approved_model ${{outputs.approved_model}}
+
+inputs:
+  model_input:
+    type: mlflow_model
+  test_data:
+    type: uri_folder
+  min_roc_auc:
+    type: number
+    default: 0.80
+  min_recall:
+    type: number
+    default: 0.60
+
+outputs:
+  approved_model:
+    type: mlflow_model

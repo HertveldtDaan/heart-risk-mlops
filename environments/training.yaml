@@ -1,0 +1,13 @@
+$schema: https://azuremlschemas.azureedge.net/latest/environment.schema.json
+name: heart-training-env
+version: 0.1.0
+description: Python 3.12 environment for the heart-risk prep, train and evaluate components (scikit-learn + LightGBM + MLflow)
+
+conda_file: ./conda/training-conda.yaml
+image: mcr.microsoft.com/azureml/openmpi5.0-ubuntu24.04:latest
+os_type: linux
+
+tags:
+  scikit-learn: 1.7.2
+  lightgbm: 4.6.0
+  mlflow: 3.15.0

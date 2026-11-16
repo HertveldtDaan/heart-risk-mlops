@@ -1,0 +1,14 @@
+# Model runtime: same versions as environments/conda/training-conda.yaml
+numpy==2.3.3
+pandas==2.3.3
+scipy==1.16.2
+scikit-learn==1.7.2
+lightgbm==4.6.0
+mlflow-skinny==3.15.0
+skops==0.16.0          # safe model format (no pickle): mlflow-skinny doesn't include it
+
+# API + database
+fastapi==0.142.2
+uvicorn==0.54.0
+sqlalchemy==2.0.44
+psycopg[binary]==3.2.10

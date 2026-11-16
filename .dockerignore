@@ -1,0 +1,8 @@
+# Allow-list: only what the API image needs is sent to the Docker build
+*
+!api/requirements.txt
+!api/app/
+!src/heartrisk/
+!model/
+**/__pycache__
+**/*.pyc

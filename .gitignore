@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+
+# Data lives in Azure ML as a versioned data asset, not in git (140 MB > GitHub limit)
+data/
+
+# The model comes from the Azure ML registry (downloaded by the pipeline), not from git
+model/
+outputs/
+
+# Local runs
+mlruns/
+mlflow.db
+predictions.db
+
+# Secrets
+.env

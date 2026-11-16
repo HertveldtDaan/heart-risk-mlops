@@ -1,0 +1,5 @@
+# Local development + CI: training code, API and tests in one environment
+-r api/requirements.txt
+mlflow==3.15.0
+pytest==8.4.2
+httpx==0.28.1

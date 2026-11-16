@@ -1,0 +1,16 @@
+name: heart-training-env
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pip=25.2
+  - pip:
+    # Same versions as api/requirements.txt: the model must load in the API exactly as it was trained
+    - numpy==2.3.3
+    - pandas==2.3.3
+    - scipy==1.16.2
+    - scikit-learn==1.7.2
+    - lightgbm==4.6.0
+    - mlflow==3.15.0
+    - skops==0.16.0
+    - azureml-mlflow==1.62.0.post6

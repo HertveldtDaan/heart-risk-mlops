@@ -1,0 +1,44 @@
+$schema: https://azuremlschemas.azureedge.net/latest/commandComponent.schema.json
+name: heart_training
+version: 0.1.0
+display_name: Heart model training (LightGBM vs baseline)
+description: Trains a logistic regression baseline and a LightGBM model, tunes the decision threshold on validation data and saves an MLflow model with release.json.
+type: command
+
+code: ../../src
+environment: azureml:heart-training-env:0.1.0
+command: >-
+  python train.py
+  --train_data ${{inputs.train_data}}
+  --val_data ${{inputs.val_data}}
+  --n_estimators ${{inputs.n_estimators}}
+  --learning_rate ${{inputs.learning_rate}}
+  --num_leaves ${{inputs.num_leaves}}
+  --seed ${{inputs.seed}}
+  --git_sha ${{inputs.git_sha}}
+  --model_output ${{outputs.model_output}}
+
+inputs:
+  train_data:
+    type: uri_folder
+  val_data:
+    type: uri_folder
+  n_estimators:
+    type: integer
+    default: 500
+  learning_rate:
+    type: number
+    default: 0.05
+  num_leaves:
+    type: integer
+    default: 31
+  seed:
+    type: integer
+    default: 42
+  git_sha:
+    type: string
+    default: local
+
+outputs:
+  model_output:
+    type: mlflow_model
