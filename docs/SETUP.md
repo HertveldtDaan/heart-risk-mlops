@@ -23,7 +23,7 @@ Het script maakt aan:
 
 - resource group `mlops-home-project` en workspace `hertveldt-daan-heart` (francecentral);
 - data asset `heart-disease-2022:1` (upload van de CSV);
-- app registration `github-heart-risk-mlops` met een service principal en een **OIDC federated credential** voor `repo:hertveldtdaan/heart-risk-mlops:environment:azure-ml` (geen client secret);
+- app registration `github-heart-risk-mlops` met een service principal en een **OIDC federated credential** (geen client secret). Let op: GitHub stuurt het subject in het "immutable" formaat met numerieke ID's, `repo:HertveldtDaan@<owner_id>/heart-risk-mlops@<repo_id>:environment:azure-ml`, en Entra ID vergelijkt hoofdlettergevoelig. Het script haalt die ID's op via de GitHub-API. De repo moet dus al bestaan wanneer je het script draait;
 - de rollen *AzureML Data Scientist* en *AzureML Compute Operator*, enkel op de workspace.
 
 Andere namen kies je met omgevingsvariabelen, bv. `GITHUB_REPO=owner/naam bash scripts/azure-setup.sh`.

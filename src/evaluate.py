@@ -62,7 +62,9 @@ def main():
             "recall_difference": float(table["recall"].max() - table["recall"].min()),
         }
         mlflow.log_metric(f"fairness_recall_diff_{name}", fairness[name]["recall_difference"])
-        mlflow.log_table(table, artifact_file=f"fairness/{name}.json")
+        # log_dict instead of log_table: log_table calls the MLflow 3 "logged models" API,
+        # which the Azure ML MLflow server doesn't support (404)
+        mlflow.log_dict(fairness[name], f"fairness/{name}.json")
 
     sample = X_test.sample(n=min(5000, len(X_test)), random_state=42)
     importance = global_importance(model, sample)

@@ -68,6 +68,10 @@ jobs:
       id-token: write
     outputs:
       candidate_version: ${{ steps.register.outputs.version }}
+    env:
+      # Azure ML component versions are immutable: every run registers its own version,
+      # so a pipeline run always uses exactly the component code of this commit
+      COMPONENT_VERSION: 1.0.${{ github.run_number }}
 
     steps:
       - name: Check out repository
@@ -139,8 +143,8 @@ jobs:
             az extension add --name ml -y
             az configure --defaults group=$GROUP workspace=$WORKSPACE location=$LOCATION
             for file in ./components/*/*.yaml; do
-              echo "Creating component from $file"
-              az ml component create --file "$file"
+              echo "Creating component from $file (version $COMPONENT_VERSION)"
+              az ml component create --file "$file" --set version=$COMPONENT_VERSION
             done
 
       - name: Azure -- Pipeline Run
@@ -159,6 +163,9 @@ jobs:
               --set inputs.sample_fraction=${{ inputs.sample_fraction }} \
               --set inputs.git_sha=$GITHUB_SHA \
               --set settings.default_compute=azureml:$COMPUTE_NAME \
+              --set jobs.prep.component=azureml:heart_data_prep:$COMPONENT_VERSION \
+              --set jobs.train.component=azureml:heart_training:$COMPONENT_VERSION \
+              --set jobs.evaluate.component=azureml:heart_evaluate:$COMPONENT_VERSION \
               --stream
             STATUS=$(az ml job show --name "$JOB_NAME" --query status -o tsv)
             echo "Pipeline status: $STATUS"
@@ -183,6 +190,7 @@ jobs:
                     tags.pipeline_job=${{ steps.pipeline.outputs.job_name }} \
                     tags.data_version=${{ inputs.data_version }} \
                     tags.sample_fraction=${{ inputs.sample_fraction }} \
+                    tags.component_version=$COMPONENT_VERSION \
                     tags.stage=candidate
             echo "version=$VERSION" >> "$GITHUB_OUTPUT"
             {

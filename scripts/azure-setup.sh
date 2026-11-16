@@ -50,15 +50,26 @@ fi
 az ad sp show --id "$APP_ID" -o none 2>/dev/null || az ad sp create --id "$APP_ID" -o none
 SP_OBJECT_ID=$(az ad sp show --id "$APP_ID" --query id -o tsv)
 
-CRED_NAME="github-${GITHUB_ENVIRONMENT}"
+# GitHub now sends an "immutable" subject with the numeric owner and repo IDs:
+#   repo:Owner@<owner_id>/repo@<repo_id>:environment:<env>
+# (it doesn't change when the account or repo is renamed). The match is case-sensitive.
+REPO_INFO=$(curl -s "https://api.github.com/repos/${GITHUB_REPO}")
+OWNER=$(echo "$REPO_INFO" | python -c "import json,sys; print(json.load(sys.stdin)['owner']['login'])")
+OWNER_ID=$(echo "$REPO_INFO" | python -c "import json,sys; print(json.load(sys.stdin)['owner']['id'])")
+REPO=$(echo "$REPO_INFO" | python -c "import json,sys; print(json.load(sys.stdin)['name'])")
+REPO_ID=$(echo "$REPO_INFO" | python -c "import json,sys; print(json.load(sys.stdin)['id'])")
+SUBJECT="repo:${OWNER}@${OWNER_ID}/${REPO}@${REPO_ID}:environment:${GITHUB_ENVIRONMENT}"
+
+CRED_NAME="github-${GITHUB_ENVIRONMENT}-immutable-ids"
 if ! az ad app federated-credential show --id "$APP_ID" --federated-credential-id "$CRED_NAME" -o none 2>/dev/null; then
   az ad app federated-credential create --id "$APP_ID" --parameters "{
     \"name\": \"$CRED_NAME\",
     \"issuer\": \"https://token.actions.githubusercontent.com\",
-    \"subject\": \"repo:${GITHUB_REPO}:environment:${GITHUB_ENVIRONMENT}\",
+    \"subject\": \"$SUBJECT\",
     \"audiences\": [\"api://AzureADTokenExchange\"]
   }" -o none
 fi
+echo "Federated credential subject: $SUBJECT"
 
 echo "== 4. Roles on the workspace (least privilege, nothing on the subscription)"
 for ROLE in "AzureML Data Scientist" "AzureML Compute Operator"; do
