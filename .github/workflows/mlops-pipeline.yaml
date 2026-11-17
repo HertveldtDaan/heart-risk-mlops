@@ -229,18 +229,14 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Download the data asset
-        run: |
-          az extension add --name ml -y
-          az ml data download --name heart-disease-2022 --version ${{ inputs.data_version }} \
-            --resource-group $AZURE_RESOURCE_GROUP --workspace-name $AZURE_ML_WORKSPACE --download-path ./rai-data
-          echo "RAW_CSV=$(find ./rai-data -name '*.csv' | head -n 1)" >> "$GITHUB_ENV"
-
+      # The script downloads the versioned data asset itself (via the Azure ML SDK),
+      # builds a complete-case sample with the shared cleaning code and submits the RAI pipeline
       - name: Submit the RAI dashboard pipeline
         run: |
           test -n "$MODEL_VERSION" || { echo "::error::No model version to analyse"; exit 1; }
           pip install -r rai/requirements.txt pandas==2.3.3 scikit-learn==1.7.2
-          python rai/rai_dashboard.py --model-version "$MODEL_VERSION" --raw-csv "$RAW_CSV"
+          python rai/rai_dashboard.py --model-version "$MODEL_VERSION" \
+            --data-asset "heart-disease-2022:${{ inputs.data_version }}"
 
   # 2. Download the APPROVED model from the registry
   download:

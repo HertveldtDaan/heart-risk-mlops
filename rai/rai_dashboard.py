@@ -10,6 +10,7 @@ thousand rows, so we build a complete-case stratified sample with the SAME
 cleaning code as the training pipeline (heartrisk.features).
 
 Usage (after `az login`, or in GitHub Actions after azure/login):
+  python rai/rai_dashboard.py --model-version 3 --data-asset heart-disease-2022:1
   python rai/rai_dashboard.py --model-version 3 --raw-csv data/raw/heart_2022_with_nans.csv
 """
 import argparse
@@ -52,6 +53,20 @@ def build_samples(raw_csv: str, n_train: int, n_test: int, seed: int = 42):
     return train, test
 
 
+def download_data_asset(ml_client: MLClient, asset: str) -> str:
+    """Download a uri_file data asset (name:version) to a temp folder and return the CSV path."""
+    from azure.ai.ml._artifacts._artifact_utilities import download_artifact_from_aml_uri
+
+    name, version = asset.split(":")
+    data = ml_client.data.get(name=name, version=version)
+    target = Path(tempfile.mkdtemp())
+    download_artifact_from_aml_uri(uri=data.path, destination=str(target),
+                                   datastore_operation=ml_client.datastores)
+    csv = next(target.rglob("*.csv"))
+    print(f"Downloaded data asset {asset} -> {csv} ({csv.stat().st_size / 1e6:.0f} MB)")
+    return str(csv)
+
+
 def register_mltable(ml_client: MLClient, df: pd.DataFrame, name: str) -> Data:
     folder = Path(tempfile.mkdtemp()) / name
     folder.mkdir(parents=True)
@@ -68,7 +83,11 @@ def register_mltable(ml_client: MLClient, df: pd.DataFrame, name: str) -> Data:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-version", required=True)
-    parser.add_argument("--raw-csv", required=True)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--data-asset", help="Azure ML data asset as name:version, e.g. heart-disease-2022:1")
+    source.add_argument("--raw-csv", help="Local copy of the raw CSV")
+    parser.add_argument("--submit", action=argparse.BooleanOptionalAction, default=True,
+                        help="--no-submit: only prepare the samples (dry run)")
     parser.add_argument("--n-train", type=int, default=5000)
     parser.add_argument("--n-test", type=int, default=2000)
     parser.add_argument("--counterfactuals", action="store_true", help="Also compute counterfactuals (slow)")
@@ -82,7 +101,12 @@ def main():
     ml_client = MLClient(credential, args.subscription, args.resource_group, args.workspace)
     registry = MLClient(credential, args.subscription, args.resource_group, registry_name="azureml")
 
-    train, test = build_samples(args.raw_csv, args.n_train, args.n_test)
+    raw_csv = args.raw_csv or download_data_asset(ml_client, args.data_asset)
+    train, test = build_samples(raw_csv, args.n_train, args.n_test)
+    print(f"RAI samples: train {train.shape}, test {test.shape}, "
+          f"positive rate {train['HadHeartAttack'].mean():.3f} / {test['HadHeartAttack'].mean():.3f}")
+    if not args.submit:
+        return
     train_data = register_mltable(ml_client, train, "heart-rai-train")
     test_data = register_mltable(ml_client, test, "heart-rai-test")
 
