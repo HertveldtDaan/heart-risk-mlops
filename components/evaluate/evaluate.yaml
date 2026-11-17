@@ -6,7 +6,7 @@ description: Evaluates the model on the held-out test set, audits fairness per g
 type: command
 
 code: ../../src
-environment: azureml:heart-training-env:0.1.0
+environment: azureml:heart-training-env:0.2.0
 command: >-
   python evaluate.py
   --model_input ${{inputs.model_input}}

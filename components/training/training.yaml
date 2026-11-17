@@ -6,7 +6,7 @@ description: Trains a logistic regression baseline and a LightGBM model, tunes t
 type: command
 
 code: ../../src
-environment: azureml:heart-training-env:0.1.0
+environment: azureml:heart-training-env:0.2.0
 command: >-
   python train.py
   --train_data ${{inputs.train_data}}

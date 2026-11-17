@@ -13,4 +13,5 @@ dependencies:
     - lightgbm==4.6.0
     - mlflow==3.15.0
     - skops==0.16.0
+    - matplotlib==3.11.2   # evaluation charts (added in environment 0.2.0)
     - azureml-mlflow==1.62.0.post6

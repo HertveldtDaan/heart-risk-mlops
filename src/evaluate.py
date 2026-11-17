@@ -71,6 +71,12 @@ def main():
     print("\nGlobal SHAP importance (top 10):", list(importance.items())[:10])
     mlflow.log_dict(importance, "shap_global_importance.json")
 
+    # Charts: visible in Azure ML Studio under the job's "Images" tab
+    from heartrisk.plots import fairness_chart, shap_importance_chart
+
+    mlflow.log_figure(fairness_chart(fairness, test_metrics["recall"], threshold), "charts/fairness_recall.png")
+    mlflow.log_figure(shap_importance_chart(importance), "charts/shap_importance.png")
+
     # Quality gate
     baseline_pr_auc = release["baseline_validation_metrics"]["pr_auc"]
     checks = {

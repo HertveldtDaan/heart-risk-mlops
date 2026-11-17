@@ -7,7 +7,7 @@ type: command
 is_deterministic: true
 
 code: ../../src
-environment: azureml:heart-training-env:0.1.0
+environment: azureml:heart-training-env:0.2.0
 command: >-
   python prep.py
   --raw_data ${{inputs.raw_data}}
