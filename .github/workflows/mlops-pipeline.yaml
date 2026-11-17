@@ -430,7 +430,15 @@ jobs:
           inlineScript: |
             az extension add --name ml -y
             az configure --defaults group=$GROUP workspace=$WORKSPACE location=$LOCATION
-            az ml model update --name $MODEL_NAME --version "${{ inputs.model_version }}" \
+            NEW="${{ inputs.model_version }}"
+            # Only one version can be in production: archive the previous one(s)
+            for OLD in $(az ml model list --name $MODEL_NAME --query "[?tags.stage=='production'].version" -o tsv); do
+              if [ "$OLD" != "$NEW" ]; then
+                echo "Archiving previous production version $OLD"
+                az ml model update --name $MODEL_NAME --version "$OLD" --set tags.stage=archived tags.replaced_by=$NEW
+              fi
+            done
+            az ml model update --name $MODEL_NAME --version "$NEW" \
               --set tags.stage=production \
                     tags.image_digest=${{ needs.build.outputs.digest }} \
                     tags.deployed_by_run=$GITHUB_RUN_ID
